@@ -1,83 +1,241 @@
-<script>
-/* ... seu código anterior (chart, setData, etc.) ... */
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BTC/BRL • Gráfico em Tempo Real (1m)</title>
 
-const SYMBOL = 'BTCBRL';
-const INTERVAL = '1m';
-const REST_BASE = 'https://api.binance.com';
-const WS_URL = `wss://stream.binance.com:9443/ws/${SYMBOL.toLowerCase()}@kline_1m`;
+  <!-- Preconnect / DNS Prefetch -->
+  <link rel="preconnect" href="https://api.binance.com">
+  <link rel="preconnect" href="https://stream.binance.com">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="dns-prefetch" href="https://api.binance.com">
+  <link rel="dns-prefetch" href="https://stream.binance.com">
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
 
-let ws;
-let reconnects = 0;
-let lastBarTime = null; // mantenha essa variável como no seu código
-let pollingTimer = null;
+  <!-- TradingView Lightweight Charts (via jsDelivr) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 
-function startPolling() {
-  clearInterval(pollingTimer);
-  // Busca apenas a última vela (limit=1) a cada 3s
-  const url = `${REST_BASE}/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=1`;
-  pollingTimer = setInterval(async () => {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error('REST polling falhou');
-      const [k] = await r.json();
-      const t = Math.floor(k[0] / 1000);
-      const bar = { time:t, open:+k[1], high:+k[2], low:+k[3], close:+k[4] };
-      // atualiza vela atual ou insere nova
-      if (lastBarTime === t) {
-        candleSeries.update(bar);
-      } else if (lastBarTime == null || t > lastBarTime) {
-        candleSeries.update(bar);
-        lastBarTime = t;
+  <style>
+    :root { --bg:#0b0b0b; --fg:#e6e6e6; --muted:#9aa0a6; --up:#2ecc71; --down:#e74c3c; --panel:#111214; }
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    .wrap{display:grid;grid-template-rows:auto 1fr auto;height:100%}
+    header,footer{padding:10px 14px;background:var(--panel);border-bottom:1px solid #1a1b1e}
+    footer{border-top:1px solid #1a1b1e;border-bottom:none}
+    .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .pair{font-weight:700;letter-spacing:.3px}
+    .pill{padding:4px 10px;border-radius:999px;background:#16181c;color:var(--muted);border:1px solid #22242a;font-size:12px}
+    .price{font-weight:800;font-size:20px;letter-spacing:.3px}
+    .chg.up{color:var(--up)} .chg.down{color:var(--down)}
+    #chart{width:100%;height:calc(100vh - 120px)}
+    .status{font-size:12px;color:var(--muted)}
+    .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;background:#888}
+    .dot.live{background:#3ddc97}.dot.off{background:#bf616a}
+    a{color:#8ab4f8;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="row">
+      <div class="pair">BTC/BRL</div>
+      <div class="pill">Intervalo: 1m</div>
+      <div id="live-dot" class="dot off"></div><span id="conn" class="status">Carregando…</span>
+      <div style="flex:1"></div>
+      <div class="price" id="last">—</div>
+      <div id="change" class="pill chg">—</div>
+    </header>
+
+    <div id="chart"></div>
+
+    <footer class="row">
+      <div class="status" id="hint">Fonte: Binance. Se WS não conectar, entra em modo polling (3s).</div>
+      <div style="flex:1"></div>
+      <div class="status">Dica: mouse para OHLC; scroll para zoom; arraste para navegar.</div>
+    </footer>
+  </div>
+
+  <script>
+  (function(){
+    const SYMBOL = 'BTCBRL';
+    const INTERVAL = '1m';
+    const HISTORY_LIMIT = 300;     // menos histórico = mais rápido
+    const REST_BASE = 'https://api.binance.com';
+    const WS_URL = `wss://stream.binance.com:9443/ws/${SYMBOL.toLowerCase()}@kline_1m`;
+
+    // cores cacheadas
+    const css = getComputedStyle(document.documentElement);
+    const COLOR_BG   = css.getPropertyValue('--bg').trim();
+    const COLOR_FG   = css.getPropertyValue('--fg').trim();
+    const COLOR_UP   = css.getPropertyValue('--up').trim();
+    const COLOR_DOWN = css.getPropertyValue('--down').trim();
+
+    // elementos UI
+    const elLast   = document.getElementById('last');
+    const elChange = document.getElementById('change');
+    const elConn   = document.getElementById('conn');
+    const dot      = document.getElementById('live-dot');
+
+    const setConn = (txt, live) => {
+      elConn.textContent = txt;
+      dot.classList.toggle('live', !!live);
+      dot.classList.toggle('off', !live);
+    };
+
+    const toNum = v => Number.parseFloat(v);
+    const fmtBRL = n => {
+      try { return n.toLocaleString('pt-BR', { style:'currency', currency:'BRL', maximumFractionDigits:2 }); }
+      catch { return `R$ ${( +n ).toFixed(2)}`; }
+    };
+
+    // gráfico
+    const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+      layout: { background:{ color: COLOR_BG }, textColor: COLOR_FG, fontSize: 12 },
+      rightPriceScale: { borderColor:'#2a2d34' },
+      timeScale: { borderColor:'#2a2d34', rightOffset: 6, barSpacing: 8 },
+      grid: { vertLines:{ color:'#15171a' }, horzLines:{ color:'#15171a' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      autoSize: true,
+    });
+
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: COLOR_UP, downColor: COLOR_DOWN,
+      borderUpColor: COLOR_UP, borderDownColor: COLOR_DOWN,
+      wickUpColor: COLOR_UP, wickDownColor: COLOR_DOWN,
+    });
+
+    let lastBarTime = null;
+    let dayOpen = null;
+
+    function setPriceUI(price){
+      elLast.textContent = fmtBRL(price);
+      if (dayOpen != null){
+        const pct = ((price - dayOpen) / dayOpen) * 100;
+        elChange.textContent = `${pct>=0?'+':''}${pct.toFixed(2)}%`;
+        elChange.classList.toggle('up', pct >= 0);
+        elChange.classList.toggle('down', pct < 0);
       }
-      // atualize sua UI de preço aqui se tiver (ex.: setPriceUI(bar.close))
-    } catch (e) {
-      console.error(e);
     }
-  }, 3000);
-  // opcional: indique no UI que está em modo "polling"
-  document.getElementById('conn')?.textContent = 'Atualizando (polling)';
-}
 
-function openWS() {
-  try { ws?.close(); } catch {}
-  ws = new WebSocket(WS_URL);
-
-  ws.onopen = () => {
-    reconnects = 0;
-    document.getElementById('conn')?.textContent = 'Ao vivo (WebSocket)';
-  };
-
-  ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
-    const k = msg.k;
-    const t = Math.floor(k.t / 1000);
-    const bar = { time:t, open:+k.o, high:+k.h, low:+k.l, close:+k.c };
-
-    if (lastBarTime === t) {
-      candleSeries.update(bar);
-    } else if (lastBarTime == null || t > lastBarTime) {
-      candleSeries.update(bar);
-      lastBarTime = t;
+    // throttle p/ updates (4 FPS)
+    const MAX_FPS = 4, FRAME_MS = 1000 / MAX_FPS;
+    let lastPaint = 0, queuedBar = null, rafId = null;
+    function schedulePaint(){
+      if (rafId) return;
+      rafId = requestAnimationFrame(ts => {
+        rafId = null;
+        if (ts - lastPaint < FRAME_MS) { schedulePaint(); return; }
+        lastPaint = ts;
+        if (queuedBar){
+          candleSeries.update(queuedBar);
+          setPriceUI(queuedBar.close);
+          queuedBar = null;
+        }
+      });
     }
-    // atualize sua UI de preço aqui (ex.: setPriceUI(bar.close))
-  };
 
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
+    // carregar histórico inicial + ticker 24h
+    async function loadInitial(){
+      setConn('Carregando histórico…', false);
+      try{
+        const [klRes, tkRes] = await Promise.all([
+          fetch(`${REST_BASE}/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${HISTORY_LIMIT}`),
+          fetch(`${REST_BASE}/api/v3/ticker/24hr?symbol=${SYMBOL}`)
+        ]);
+        if(!klRes.ok || !tkRes.ok) throw new Error('Falha nas requisições iniciais');
+        const klines = await klRes.json();
+        const ticker = await tkRes.json();
 
-  ws.onclose = () => {
-    // tenta 2 reconexões; depois cai no polling
-    if (reconnects < 2) {
-      reconnects += 1;
-      setTimeout(openWS, 1500);
-      document.getElementById('conn')?.textContent = 'Reconectando WS…';
-    } else {
-      startPolling();
+        dayOpen = toNum(ticker.openPrice);
+
+        const data = klines.map(k => ({
+          time: Math.floor(k[0]/1000),
+          open: toNum(k[1]),
+          high: toNum(k[2]),
+          low:  toNum(k[3]),
+          close:toNum(k[4]),
+        }));
+        candleSeries.setData(data);
+        chart.timeScale().fitContent();
+
+        const last = data[data.length-1];
+        lastBarTime = last.time;
+        setPriceUI(last.close);
+
+        setConn('Conectando ao tempo real…', false);
+        openWS();
+      }catch(e){
+        console.error(e);
+        setConn('Erro ao carregar. Recarregue a página.', false);
+      }
     }
-  };
-}
 
-/* chame openWS() DEPOIS de carregar o histórico inicial */
-openWS();
-</script>
+    // ======= WebSocket com reconexão + fallback para polling =======
+    let ws, reconnects = 0, pollingTimer = null;
+
+    function startPolling() {
+      clearInterval(pollingTimer);
+      setConn('Atualizando (polling 3s)', false);
+      const url = `${REST_BASE}/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=1`;
+      pollingTimer = setInterval(async () => {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) throw new Error('REST polling falhou');
+          const [k] = await r.json();
+          const t = Math.floor(k[0] / 1000);
+          const bar = { time:t, open:+k[1], high:+k[2], low:+k[3], close:+k[4] };
+          if (lastBarTime === t) {
+            queuedBar = bar;
+          } else if (lastBarTime == null || t > lastBarTime) {
+            queuedBar = bar;
+            lastBarTime = t;
+          }
+          schedulePaint();
+        } catch (e) {
+          console.error(e);
+        }
+      }, 3000);
+    }
+
+    function openWS(){
+      try { ws?.close(); } catch {}
+      clearInterval(pollingTimer);
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        reconnects = 0;
+        setConn('Ao vivo (WebSocket)', true);
+      };
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        const k = msg.k;
+        const t = Math.floor(k.t/1000);
+        const bar = { time:t, open:+k.o, high:+k.h, low:+k.l, close:+k.c };
+        if (lastBarTime === t) {
+          queuedBar = bar;
+        } else if (lastBarTime == null || t > lastBarTime) {
+          queuedBar = bar;
+          lastBarTime = t;
+        }
+        schedulePaint();
+      };
+
+      ws.onerror = () => { try { ws.close(); } catch {} };
+
+      ws.onclose = (e) => {
+        if (reconnects < 2) {
+          reconnects += 1;
+          setConn('Reconectando WS…', false);
+          setTimeout(openWS, 1500);
+        } else {
+          startPolling(); // fallback definitivo
+        }
+      };
+    }
+
+    // iniciar
+    loadInitial();
+  })();
+  </script>
+</body>
+</html>
