@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BTC/BRL • Diagnóstico + Candle 1m (REST)</title>
+  <title>BTC/BRL • Candle 1m</title>
 
+  <!-- Preconnect para reduzir latência -->
   <link rel="preconnect" href="https://api.binance.com">
   <link rel="preconnect" href="https://data.binance.com">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
@@ -13,85 +14,46 @@
   <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
 
   <style>
-    :root { --bg:#0b0b0b; --fg:#e6e6e6; --muted:#9aa0a6; --up:#2ecc71; --down:#e74c3c; --panel:#111214; }
+    :root { --bg:#0b0b0b; --fg:#e6e6e6; --up:#2ecc71; --down:#e74c3c; }
     html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
-    .wrap{display:grid;grid-template-rows:auto auto 1fr auto;height:100%}
-    header,footer,.diag{padding:10px 14px;background:var(--panel);border-bottom:1px solid #1a1b1e}
-    footer{border-top:1px solid #1a1b1e;border-bottom:none}
-    .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-    .pair{font-weight:700;letter-spacing:.3px}
-    .pill{padding:4px 10px;border-radius:999px;background:#16181c;color:var(--muted);border:1px solid #22242a;font-size:12px}
-    .price{font-weight:800;font-size:28px;letter-spacing:.3px}
-    .chg.up{color:var(--up)} .chg.down{color:var(--down)}
-    #chart{width:100%;height:calc(100vh - 200px)}
-    .status{font-size:12px;color:var(--muted)}
-    .ok{color:#3ddc97} .fail{color:#e74c3c}
-    code{background:#0f1115;padding:2px 6px;border-radius:6px}
+    #chart{position:fixed;inset:0}
   </style>
 
-  <!-- Carrega a lib; se jsDelivr falhar, tenta unpkg -->
+  <!-- Lightweight Charts (tenta jsDelivr e, se falhar, unpkg) -->
   <script>
-    function loadScript(src, onload, onerror){
-      const s=document.createElement('script'); s.src=src; s.defer=true; s.onload=onload; s.onerror=onerror; document.head.appendChild(s);
+    function loadScript(src, ok, fail){
+      const s=document.createElement('script'); s.src=src; s.defer=true;
+      s.onload=ok; s.onerror=fail; document.head.appendChild(s);
     }
-    function setDiag(id, ok, msg){
-      const el=document.getElementById(id);
-      if(!el) return;
-      el.className = ok ? 'ok' : 'fail';
-      el.textContent = (ok?'✓ ':'✗ ') + msg;
+    function boot(){
+      if (window.LightweightCharts) return init();
+      loadScript(
+        "https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js",
+        ()=>init(),
+        ()=>loadScript("https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js", ()=>init(), ()=>alert("Falha ao carregar biblioteca de gráfico."))
+      );
     }
-    loadScript(
-      "https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js",
-      ()=>{ setDiag('d-lib', true, 'Biblioteca de gráfico carregada'); window.__chartsReady=true; },
-      ()=>{ 
-        loadScript("https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js",
-          ()=>{ setDiag('d-lib', true, 'Biblioteca de gráfico carregada (CDN alternativo)'); window.__chartsReady=true; },
-          ()=> setDiag('d-lib', false, 'Falha ao carregar a biblioteca de gráfico')
-        );
-      }
-    );
   </script>
 </head>
 <body>
-  <div class="wrap">
-    <header class="row">
-      <div class="pair">BTC/BRL</div>
-      <div class="pill">Candle: 1m (REST-only)</div>
-      <div style="flex:1"></div>
-      <div class="price" id="last">—</div>
-      <div id="change" class="pill chg">—</div>
-    </header>
-
-    <div class="diag">
-      <div class="status" id="d-lib">Carregando biblioteca…</div>
-      <div class="status" id="d-rest">Aguardando teste REST…</div>
-      <div class="status" id="d-base">Base REST: —</div>
-      <div class="status">Dica: abra F12 → Console e veja erros, se houver.</div>
-    </div>
-
-    <div id="chart"></div>
-
-    <footer class="row">
-      <div class="status" id="hint">Sem WebSocket (porta 9443). Atualiza via REST a cada 3s.</div>
-      <div style="flex:1"></div>
-      <div class="status">Mouse: OHLC • Scroll: zoom • Arraste: navegar</div>
-    </footer>
-  </div>
+  <div id="chart"></div>
 
   <script>
-  (async function(){
+  async function init(){
     const SYMBOL = 'BTCBRL';
     const INTERVAL = '1m';
     const HISTORY_LIMIT = 300;
 
-    const RESTS = ['https://api.binance.com','https://data.binance.com'];
-    let REST_BASE = RESTS[0];
+    // bases REST (usa a primeira que responder)
+    const BASES = ['https://api.binance.com','https://data.binance.com'];
+    let REST_BASE = BASES[0];
 
-    const dRest = (ok,msg)=>setDiag('d-rest', ok, msg);
-    const dBase = (text)=>{ document.getElementById('d-base').textContent = 'Base REST: '+text; };
-
-    // espera lib
-    while(!window.__chartsReady){ await new Promise(r=>setTimeout(r,50)); }
+    async function pickBase(){
+      for (const b of BASES){
+        try { const r = await fetch(`${b}/api/v3/time`); if (r.ok) { REST_BASE=b; return; } } catch(e){}
+      }
+      throw new Error('Nenhuma base REST disponível.');
+    }
 
     const css = getComputedStyle(document.documentElement);
     const COLOR_BG   = css.getPropertyValue('--bg').trim();
@@ -99,87 +61,61 @@
     const COLOR_UP   = css.getPropertyValue('--up').trim();
     const COLOR_DOWN = css.getPropertyValue('--down').trim();
 
-    const elLast   = document.getElementById('last');
-    const elChange = document.getElementById('change');
+    // cria gráfico de tela inteira
+    const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+      layout:{ background:{ color: COLOR_BG }, textColor: COLOR_FG, fontSize: 12 },
+      rightPriceScale:{ borderColor:'#2a2d34' },
+      timeScale:{ borderColor:'#2a2d34', rightOffset:6, barSpacing:8 },
+      grid:{ vertLines:{ color:'#15171a' }, horzLines:{ color:'#15171a' } },
+      crosshair:{ mode: LightweightCharts.CrosshairMode.Normal },
+      autoSize:true,
+    });
+    const series = chart.addCandlestickSeries({
+      upColor: COLOR_UP, downColor: COLOR_DOWN,
+      borderUpColor: COLOR_UP, borderDownColor: COLOR_DOWN,
+      wickUpColor: COLOR_UP, wickDownColor: COLOR_DOWN,
+    });
 
-    const toNum = v => Number.parseFloat(v);
-    const fmtBRL = n => { try { return n.toLocaleString('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:2}); } catch { return `R$ ${(+n).toFixed(2)}`; } };
+    const j = url => fetch(url).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
 
-    // cria gráfico
-    let chart, candleSeries;
-    function createChart(){
-      chart = LightweightCharts.createChart(document.getElementById('chart'), {
-        layout:{ background:{ color: COLOR_BG }, textColor: COLOR_FG, fontSize: 12 },
-        rightPriceScale:{ borderColor:'#2a2d34' },
-        timeScale:{ borderColor:'#2a2d34', rightOffset:6, barSpacing:8 },
-        grid:{ vertLines:{ color:'#15171a' }, horzLines:{ color:'#15171a' } },
-        crosshair:{ mode: LightweightCharts.CrosshairMode.Normal },
-        autoSize:true,
-      });
-      candleSeries = chart.addCandlestickSeries({
-        upColor: COLOR_UP, downColor: COLOR_DOWN,
-        borderUpColor: COLOR_UP, borderDownColor: COLOR_DOWN,
-        wickUpColor: COLOR_UP, wickDownColor: COLOR_DOWN,
-      });
-    }
-    createChart();
+    await pickBase();
 
-    async function fetchJSON(url){
-      const r = await fetch(url);
-      if(!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    }
+    // carrega histórico inicial
+    const klines = await j(`${REST_BASE}/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${HISTORY_LIMIT}`);
+    const data = klines.map(k=>({
+      time: Math.floor(k[0]/1000),
+      open: +k[1], high: +k[2], low: +k[3], close: +k[4],
+    }));
+    series.setData(data);
+    chart.timeScale().fitContent();
 
-    // testa REST e escolhe base
-    async function pickRestBase(){
-      for (const base of RESTS){
-        try{
-          await fetchJSON(`${base}/api/v3/time`);
-          REST_BASE = base;
-          dRest(true, 'REST OK em '+base);
-          dBase(base);
-          return;
-        }catch(e){
-          console.warn('Falha REST em', base, e);
+    let lastBarTime = data.length ? data[data.length-1].time : null;
+
+    // polling da última vela a cada 3s
+    setInterval(async ()=>{
+      try{
+        const [k] = await j(`${REST_BASE}/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=1`);
+        const t = Math.floor(k[0]/1000);
+        const bar = { time:t, open:+k[1], high:+k[2], low:+k[3], close:+k[4] };
+        if (lastBarTime === t) {
+          series.update(bar);
+        } else if (lastBarTime == null || t > lastBarTime) {
+          series.update(bar);
+          lastBarTime = t;
         }
+      }catch(e){
+        // tenta alternar base silenciosamente
+        try{
+          const next = REST_BASE === BASES[0] ? BASES[1] : BASES[0];
+          const r = await fetch(`${next}/api/v3/time`);
+          if (r.ok) REST_BASE = next;
+        }catch(_){}
       }
-      dRest(false, 'Falha em api.binance.com e data.binance.com');
-      dBase('—');
-      throw new Error('Nenhuma base REST disponível');
-    }
+    }, 3000);
+  }
 
-    let lastBarTime = null, dayOpen = null;
-
-    function setPriceUI(price){
-      elLast.textContent = fmtBRL(price);
-      if (dayOpen != null){
-        const pct = ((price - dayOpen) / dayOpen) * 100;
-        elChange.textContent = `${pct>=0?'+':''}${pct.toFixed(2)}%`;
-        elChange.classList.toggle('up', pct >= 0);
-        elChange.classList.toggle('down', pct < 0);
-      }
-    }
-
-    // Carrega histórico + open 24h
-    async function loadInitial(){
-      const [klines, ticker] = await Promise.all([
-        fetchJSON(`${REST_BASE}/api/v3/klines?symbol=${SYMBOL}&interval=${INTERVAL}&limit=${HISTORY_LIMIT}`),
-        fetchJSON(`${REST_BASE}/api/v3/ticker/24hr?symbol=${SYMBOL}`)
-      ]);
-      dayOpen = toNum(ticker.openPrice);
-      const data = klines.map(k=>({
-        time: Math.floor(k[0]/1000),
-        open: toNum(k[1]), high: toNum(k[2]), low: toNum(k[3]), close: toNum(k[4]),
-      }));
-      candleSeries.setData(data);
-      chart.timeScale().fitContent();
-      const last = data[data.length-1];
-      lastBarTime = last.time;
-      setPriceUI(last.close);
-    }
-
-    // Polling a cada 3s (última vela)
-    let pollingTimer=null;
-    function startPolling(){
-      clearInterval(pollingTimer);
-      const
+  // inicia após injeção da lib
+  boot();
+  </script>
+</body>
+</html>
